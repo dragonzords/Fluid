@@ -1,0 +1,76 @@
+name: Build & Release APK
+
+on:
+  push:
+    tags: ['v*']          # git tag v1.0.0 && git push --tags  -> builds and publishes a release
+  workflow_dispatch:       # manual run from the Actions tab (APK is attached as an artifact)
+    inputs:
+      publish:
+        description: 'Also publish a GitHub release (tag = v<versionName>-<run number>)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Decode keystore (optional)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            echo "KEYSTORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+            echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> "$GITHUB_ENV"
+          else
+            echo "No keystore secrets set: release APK will be signed with the debug key."
+          fi
+
+      - name: Build release APK
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Rename APK
+        id: apk
+        run: |
+          mkdir -p dist
+          SRC=$(ls app/build/outputs/apk/release/*.apk | head -n 1)
+          VERSION=$(grep -m1 "versionName" app/build.gradle | sed "s/.*'\(.*\)'.*/\1/")
+          NAME="Fluid-${VERSION}.apk"
+          cp "$SRC" "dist/$NAME"
+          echo "path=dist/$NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Fluid-apk
+          path: dist/*.apk
+
+      - name: Publish release (tag push)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.apk.outputs.path }}
+          generate_release_notes: true
+
+      - name: Publish release (manual run)
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.apk.outputs.version }}-${{ github.run_number }}
+          name: Fluid ${{ steps.apk.outputs.version }} (build ${{ github.run_number }})
+          files: ${{ steps.apk.outputs.path }}
+          generate_release_notes: true
