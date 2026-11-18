@@ -40,18 +40,40 @@ jobs:
             echo "No keystore secrets set: release APK will be signed with the debug key."
           fi
 
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
       - name: Build release APK
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: Rename APK
+      - name: Package & sign APK
         id: apk
         run: |
+          set -e
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -n 1)
           VERSION=$(grep -m1 "versionName" app/build.gradle | sed "s/.*'\(.*\)'.*/\1/")
-          NAME="Fluid-${VERSION}.apk"
-          cp "$SRC" "dist/$NAME"
-          echo "path=dist/$NAME" >> "$GITHUB_OUTPUT"
+          OUT="dist/Fluid-${VERSION}.apk"
+
+          if [[ "$SRC" == *unsigned* ]]; then
+            echo "Gradle produced an unsigned APK, signing it here."
+            BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
+            if [ -z "$KEYSTORE_FILE" ]; then
+              echo "No keystore secrets: using a throwaway CI key."
+              export KEYSTORE_FILE="$RUNNER_TEMP/ci.keystore"
+              export KEYSTORE_PASSWORD=fluidci123 KEY_ALIAS=fluid KEY_PASSWORD=fluidci123
+              keytool -genkeypair -keystore "$KEYSTORE_FILE" -alias fluid -keyalg RSA -keysize 2048 \
+                -validity 10000 -storepass fluidci123 -keypass fluidci123 -dname "CN=Fluid CI"
+            fi
+            "$BT/zipalign" -f -p 4 "$SRC" "$RUNNER_TEMP/aligned.apk"
+            "$BT/apksigner" sign --ks "$KEYSTORE_FILE" --ks-pass "pass:$KEYSTORE_PASSWORD" \
+              --ks-key-alias "$KEY_ALIAS" --key-pass "pass:$KEY_PASSWORD" --out "$OUT" "$RUNNER_TEMP/aligned.apk"
+          else
+            cp "$SRC" "$OUT"
+          fi
+
+          "$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)/apksigner" verify --verbose "$OUT"
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
