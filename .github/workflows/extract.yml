@@ -19,15 +19,81 @@ jobs:
           token: ${{ secrets.PAT }}
           fetch-depth: 0
 
-      - name: Extract Fluid.zip to root
+      - name: Check Fluid.zip exists
+        id: chk
         run: |
-          unzip -o Fluid.zip -d ./
-          rm Fluid.zip
+          # The push that deletes Fluid.zip re-triggers this workflow; nothing to do then.
+          if [ -f Fluid.zip ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No Fluid.zip, nothing to extract."
+          fi
+
+      - name: Unzip to a temp folder
+        if: steps.chk.outputs.found == 'true'
+        run: |
+          set -e
+          TMP="$RUNNER_TEMP/fluid_extract"
+          rm -rf "$TMP" && mkdir -p "$TMP"
+          unzip -q -o Fluid.zip -d "$TMP"
+          # If the zip has a single top-level folder (e.g. Fluid/), use its contents as the root
+          SRC="$TMP"
+          if [ "$(ls -A "$TMP" | wc -l)" -eq 1 ] && [ -d "$TMP/$(ls -A "$TMP")" ]; then
+            SRC="$TMP/$(ls -A "$TMP")"
+          fi
+          echo "SRC=$SRC" >> "$GITHUB_ENV"
+          echo "Zip contains $(find "$SRC" -type f | wc -l) files"
+
+      - name: Report files missing from the repo (before overwrite)
+        if: steps.chk.outputs.found == 'true'
+        run: |
+          cd "$SRC"
+          {
+            echo "### Files in the zip that were MISSING in the repo (will be restored)"
+            find . -type f -print0 | sort -z | while IFS= read -r -d '' f; do
+              [ -f "$GITHUB_WORKSPACE/$f" ] || echo "- \`${f#./}\`"
+            done
+            echo
+            echo "### Files in the repo that are NOT in the zip (kept, not deleted)"
+            cd "$GITHUB_WORKSPACE"
+            find . -type f -not -path './.git/*' -not -name 'Fluid.zip' -print0 | sort -z | while IFS= read -r -d '' f; do
+              [ -f "$SRC/$f" ] || echo "- \`${f#./}\`"
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Overwrite everything in the repo root
+        if: steps.chk.outputs.found == 'true'
+        run: |
+          set -e
+          # -a keeps permissions and copies dotfiles/folders, -f forces overwrite of every file
+          cp -af "$SRC"/. "$GITHUB_WORKSPACE"/
+          chmod +x gradlew
+
+      - name: Verify every file from the zip is now identical in the repo
+        if: steps.chk.outputs.found == 'true'
+        run: |
+          cd "$SRC"
+          bad=0
+          while IFS= read -r -d '' f; do
+            if [ ! -f "$GITHUB_WORKSPACE/$f" ]; then
+              echo "MISSING:   $f"; bad=1
+            elif ! cmp -s "$f" "$GITHUB_WORKSPACE/$f"; then
+              echo "DIFFERENT: $f"; bad=1
+            fi
+          done < <(find . -type f -print0)
+          if [ "$bad" -ne 0 ]; then
+            echo "Verification FAILED"; exit 1
+          fi
+          echo "Verification OK: all $(find . -type f | wc -l) files present and identical"
 
       - name: Commit and push extracted files
+        if: steps.chk.outputs.found == 'true'
         run: |
+          rm -f Fluid.zip
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
+          git add --chmod=+x gradlew
           git diff --staged --quiet || git commit -m "Extract Fluid.zip contents to root"
           git push
